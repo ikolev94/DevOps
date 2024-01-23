@@ -1,0 +1,31 @@
+sonar-project-name:build:test:
+  image: docker-local.artifactory.com/builder-jdk17@sha256:9db9e4eed629dc79663c425e1
+  extends: .maven-build-test-template
+  rules:
+    - if: $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH
+      changes:
+        - common-core/**/*
+        - .gitlab-ci.yml
+        - .gitlab-ci/**/*
+  variables:
+    SONAR_PROJECT_KEY: project-name
+    SONAR_ARGS: -Dsonar.projectKey=$SONAR_PROJECT_KEY -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.login=$SONAR_TOKEN
+  script:
+    - git config --global --add safe.directory `pwd`
+    - git diff --name-only --diff-filter=MA `git rev-list HEAD | head -2 | tail -1` $CI_COMMIT_SHA | grep '^project-name.*\.java$' | grep -q . && echo "Running SonarQube reporting" || exit 0
+    - changed_projects=$(git diff --name-only --diff-filter=MA `git rev-list HEAD | head -2 | tail -1` $CI_COMMIT_SHA | sed -n -e '/\.java$/s/\(^.*\)\(\(src\).*\)/\1/p' | grep '^project-name' | sed 's/^project-name\///' | sort -u | paste -sd ",")
+    - echo "$changed_projects"
+    - ./mvnw clean install -f project-name -DskipTests -Dskip-all-linting=true $MVN_BUILD_ARGS -pl "$changed_projects"
+    - files_to_check=$(git diff --name-only --diff-filter=MA `git rev-list HEAD | head -2 | tail -1` $CI_COMMIT_SHA | grep '^project-name.*\.java$' | sed 's/^project-name\///' | sort -u | paste -sd ",")
+    - echo "$files_to_check"
+    - ./mvnw sonar:sonar -f project-name $SONAR_ARGS $SONAR_MR_ARGS -Dsonar.inclusions="$files_to_check"
+    - task_url=$(grep -oP 'ceTaskUrl=\K[^[:space:]]+' "project-name/target/sonar/report-task.txt")
+    - >
+      while curl -sS -u "$DM_SONAR_TOKEN:" "$task_url" | grep -v SUCCESS; do
+          echo "Sleep 30 sec";
+          sleep 30;
+      done
+    - curl -sS -u "$DM_SONAR_TOKEN:" "$task_url" | json_pp
+    - python3 support/linting-tools/sonarqube_gitlab_bridge.py $CI_MERGE_REQUEST_IID $SONAR_PROJECT_KEY
+  # allows sonar job to fail without impacting the result of the whole CI execution
+  allow_failure: true
